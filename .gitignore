@@ -2,3 +2,4 @@
 venv
 crashfile.txt
 blacklist.txt
+.github/copilot-instructions.md
