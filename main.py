@@ -329,10 +329,15 @@ class MainWindow(QtWidgets.QMainWindow):
         folder = self.ensure_folder()
         if not folder:
             return
-        remove = self.ask_yes_no("Remove files?", "Do you want to remove the found unused files? This isn't 100% and can remove used files!")
+        remove, searchLuaModels = tuple(
+            self.ask_yes_no(title, text) for title, text in (
+            ("Remove files?", "Do you want to remove the found unused files? This isn't 100% and can remove used files!"),
+            ("Search Lua files?", "Do you want to search Lua files for model usage? This can help find more used models but may take longer."),
+            )
+        )
 
         def task():
-            size, count = unused_content(folder, remove)
+            size, count = unused_content(folder, remove, searchLuaModels)
             print((f"Removed {count} unused files, saving {format_size(size)}") if remove else (f"Found {count} unused files, taking up {format_size(size)}"))
             return size, count
 

@@ -15,7 +15,7 @@ model_formats = [
     ".xbox.vtx",
 ]
 
-def unused_content(path, remove=False):
+def unused_content(path, remove=False, searchLuaModels=True):
     unused_sizes = 0
     unused_count = 0
     fs = RawFileSystem(path)
@@ -54,57 +54,126 @@ def unused_content(path, remove=False):
                         vmf_used_count[vtf] = vmf_used_count.get(vtf, 0) + 1
 
     # Find all the models used in lua files
-    all_lua_used_models = []
-    for file in fs.walk_folder('lua'):
-        if file.path.endswith('.lua'):
-            lua_file_path = os.path.join(path, file.path)
-            if os.path.exists(lua_file_path):
-                with open(lua_file_path, "r", encoding="utf-8") as f:
-                    lua_contents = f.read()
-                    lua_contents = lua_contents.lower()
-                    for model in all_models:
-                        if model in lua_contents:
-                            all_lua_used_models.append(model)
+    if searchLuaModels:
+        all_lua_used_models = []
+        for file in fs.walk_folder('lua'):
+            if file.path.endswith('.lua'):
+                lua_file_path = os.path.join(path, file.path)
+                if os.path.exists(lua_file_path):
+                    with open(lua_file_path, "r", encoding="utf-8") as f:
+                        lua_contents = f.read()
+                        lua_contents = lua_contents.lower()
+                        for model in all_models:
+                            if model in lua_contents:
+                                all_lua_used_models.append(model)
 
-    # print not used models
-    print("Unused models:")
-    unused_models = []
-    for model in all_models:
-        if model not in all_lua_used_models:
-            no_ext_model = os.path.splitext(model)[0]
-            for ext in model_formats:
-                format_path = os.path.join(path, no_ext_model + ext)
-                if os.path.exists(format_path):
-                    if ext == ".mdl":
-                        unused_models.append(model)
+        # print not used models
+        print("Unused models:")
+        unused_models = []
+        for model in all_models:
+            if model not in all_lua_used_models:
+                no_ext_model = os.path.splitext(model)[0]
+                for ext in model_formats:
+                    format_path = os.path.join(path, no_ext_model + ext)
+                    if os.path.exists(format_path):
+                        if ext == ".mdl":
+                            unused_models.append(model)
 
-                        for vmt in all_model_vmts[model]:
-                            vmt_used_count[vmt] -= 1
+                            for vmt in all_model_vmts[model]:
+                                vmt_used_count[vmt] -= 1
 
-                        for vtf in all_model_vtfs.get(model, []):
-                            vmf_used_count[vtf] -= 1
+                            for vtf in all_model_vtfs.get(model, []):
+                                vmf_used_count[vtf] -= 1
 
-                    print("Found unused file:", format_path)
-                    unused_sizes += os.path.getsize(format_path)
-                    unused_count += 1
-                    if remove:
-                        os.remove(format_path)
-                        print("Removed", format_path)
+                        print("Found unused file:", format_path)
+                        unused_sizes += os.path.getsize(format_path)
+                        unused_count += 1
+                        if remove:
+                            os.remove(format_path)
+                            print("Removed", format_path)
 
-    # Find all the vmts that no longer get used
+    # Find all the vmts that no longer get used.
+    # Rather than only iterating vmts known from models (vmt_used_count keys),
+    # scan the 'materials' folder for all .vmt files and treat any whose
+    # used count is 0 (or missing) as unused. This catches .vmt files that
+    # exist on disk but are never referenced by any model.
     unused_vmts = []
-    for vmt_used in vmt_used_count:
-        if vmt_used_count[vmt_used] == 0:
-            vmt_file_path = os.path.join(path, vmt_used)
+    all_vmts_in_fs = []
+    for file in fs.walk_folder('materials'):
+        if file.path.endswith('.vmt'):
+            # file.path is relative to the addon root, e.g. 'materials/foo/bar.vmt'
+            all_vmts_in_fs.append(file.path)
+
+    # Determine which VMTS are unused (exist on disk and have no model refs).
+    unused_vmts = []
+    for vmt in all_vmts_in_fs:
+        if vmt_used_count.get(vmt, 0) == 0:
+            vmt_file_path = os.path.join(path, vmt)
             if os.path.exists(vmt_file_path):
-                unused_vmts.append(vmt_used)
+                unused_vmts.append(vmt)
+
+    # Collect directories that contain vmt files
+    unused_dirs = []
+    vmt_dirs = {}
+    for vmt in all_vmts_in_fs:
+        d = os.path.dirname(vmt)
+        vmt_dirs.setdefault(d, []).append(vmt)
+
+    # Determine directories where all .vmt files are unused. We'll print the
+    # directory only in that case, and avoid printing the individual files to
+    # reduce noise. For counting/sizing, we'll still include the files so the
+    # totals remain accurate.
+    unused_dir_set = set()
+    for d, vmts in vmt_dirs.items():
+        if all(v in unused_vmts for v in vmts):
+            dir_full = os.path.join(path, d)
+            if os.path.exists(dir_full):
+                unused_dirs.append(d)
+                unused_dir_set.add(d)
+
+    # Report unused files that are NOT part of an entirely-unused directory.
+    # For files inside entirely-unused directories, we'll report the directory
+    # only below.
+    for vmt in all_vmts_in_fs:
+        parent = os.path.dirname(vmt)
+        if vmt in unused_vmts and parent not in unused_dir_set:
+            vmt_file_path = os.path.join(path, vmt)
+            unused_sizes += os.path.getsize(vmt_file_path)
+            unused_count += 1
+            print("Found unused file:", vmt_file_path)
+            if remove:
+                try:
+                    os.remove(vmt_file_path)
+                    print("Removed", vmt)
+                except OSError:
+                    pass
+
+    # Now report and optionally remove entire unused directories.
+    for d in unused_dirs:
+        dir_full = os.path.join(path, d)
+        # Add sizes/counts for all vmt files in this directory
+        for vmt in vmt_dirs.get(d, []):
+            vmt_file_path = os.path.join(path, vmt)
+            if os.path.exists(vmt_file_path):
                 unused_sizes += os.path.getsize(vmt_file_path)
                 unused_count += 1
-                print("Found unused file:", vmt_file_path)
-                if remove:
-                    os.remove(vmt_file_path)
-                    print("Removed", vmt_used)
-    
+        print("Found unused material directory:", dir_full)
+        if remove:
+            # Remove files first, then attempt to remove directories.
+            for vmt in vmt_dirs.get(d, []):
+                vmt_file_path = os.path.join(path, vmt)
+                try:
+                    if os.path.exists(vmt_file_path):
+                        os.remove(vmt_file_path)
+                except OSError:
+                    pass
+            try:
+                os.removedirs(dir_full)
+                print("Removed directory:", dir_full)
+            except OSError:
+                # Could not remove (not empty or permission issues) -- skip
+                pass
+
     unused_vtfs = []
     for vtf_used in vmf_used_count:
         if vmf_used_count[vtf_used] == 0:
